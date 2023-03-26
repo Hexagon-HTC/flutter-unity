@@ -1,34 +1,49 @@
+import 'dart:async' show StreamController, StreamSubscription;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+enum UnityViewControllerStatus {
+  created,
+  reattached,
+}
+
 class UnityViewController {
-  UnityViewController._(
-    UnityView view,
-    int id,
-  )   : _view = view,
-        _channel = MethodChannel('unity_view_$id') {
-    _channel.setMethodCallHandler(_methodCallHandler);
+  static UnityViewController get instance => _instance;
+  static late final UnityViewController _instance;
+  final int id;
+  final MethodChannel _channel;
+  final _messageStream = StreamController<String>.broadcast();
+  Stream<String> get messageStream => _messageStream.stream;
+  final _statusStream = StreamController<UnityViewControllerStatus>.broadcast();
+  Stream<UnityViewControllerStatus> get statusStream => _statusStream.stream;
+
+  UnityViewController(this.id) : _channel = MethodChannel('unity_view_$id') {
+    _channel.setMethodCallHandler(_onEvent);
+    if (id == 0) _instance = this;
   }
 
-  UnityView _view;
-  final MethodChannel _channel;
-
-  Future<dynamic> _methodCallHandler(MethodCall call) async {
+  Future<void> _onEvent(MethodCall call) async {
     switch (call.method) {
       case 'onUnityViewReattached':
-        if (_view.onReattached != null) {
-          _view.onReattached!(this);
-        }
-        return null;
+        _statusStream.add(UnityViewControllerStatus.reattached);
+        return;
       case 'onUnityViewMessage':
-        if (_view.onMessage != null) {
-          _view.onMessage!(this, call.arguments);
-        }
-        return null;
+        _messageStream.add(call.arguments);
+        return;
       default:
         throw UnimplementedError('Unimplemented method: ${call.method}');
     }
+  }
+
+  void dispose() {
+    if (id == 0) return;
+    _messageStream.close();
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      _channel.invokeMethod('dispose');
+    }
+    _channel.setMethodCallHandler(null);
   }
 
   void pause() {
@@ -52,16 +67,9 @@ class UnityViewController {
   }
 }
 
-typedef void UnityViewCreatedCallback(
-  UnityViewController? controller,
-);
-typedef void UnityViewReattachedCallback(
-  UnityViewController controller,
-);
-typedef void UnityViewMessageCallback(
-  UnityViewController controller,
-  String? message,
-);
+typedef UnityViewCreatedCallback = void Function(UnityViewController controller);
+typedef UnityViewReattachedCallback = void Function(UnityViewController controller);
+typedef UnityViewMessageCallback = void Function(UnityViewController controller, String message);
 
 class UnityView extends StatefulWidget {
   const UnityView({
@@ -81,24 +89,14 @@ class UnityView extends StatefulWidget {
 
 class _UnityViewState extends State<UnityView> {
   UnityViewController? controller;
-
-  @override
-  void initState() {
-    super.initState();
-  }
-
-  @override
-  void didUpdateWidget(UnityView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    controller?._view = widget;
-  }
+  late StreamSubscription messageSub;
+  late StreamSubscription statusSub;
 
   @override
   void dispose() {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      controller?._channel?.invokeMethod('dispose');
-    }
-    controller?._channel?.setMethodCallHandler(null);
+    messageSub.cancel();
+    statusSub.cancel();
+    controller?.dispose();
     super.dispose();
   }
 
@@ -110,22 +108,29 @@ class _UnityViewState extends State<UnityView> {
           viewType: 'unity_view',
           onPlatformViewCreated: onPlatformViewCreated,
         );
-        break;
       case TargetPlatform.iOS:
         return UiKitView(
           viewType: 'unity_view',
           onPlatformViewCreated: onPlatformViewCreated,
         );
-        break;
       default:
         throw UnsupportedError('Unsupported platform: $defaultTargetPlatform');
     }
   }
 
   void onPlatformViewCreated(int id) {
-    controller = UnityViewController._(widget, id);
-    if (widget.onCreated != null) {
-      widget.onCreated!(controller);
-    }
+    final newController = UnityViewController(id);
+
+    controller = newController;
+
+    messageSub = newController.messageStream.listen((message) {
+      widget.onMessage?.call(newController, message);
+    });
+
+    statusSub = newController.statusStream.listen((status) {
+      widget.onReattached?.call(newController);
+    });
+
+    widget.onCreated?.call(newController);
   }
 }
